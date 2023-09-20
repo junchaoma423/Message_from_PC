@@ -103,58 +103,61 @@ void generateMessage(int motorID, int operationMode, float torque, float positio
 }
 
 Serial::Serial(std::string path, int baudrate) {
-    /* Open modem device for reading and writing and not as controlling tty
-    because we don't want to get killed if linenoise sends CTRL-C. */
-    fd = open(path.c_str(), O_RDWR | O_NOCTTY | O_NDELAY | O_EXCL);
-    if (fd <0) {
-        exit(-1);
+    enum sp_return result = sp_get_port_by_name(path.c_str(), &port);
+    if (result != SP_OK) {
+        perror("Error finding the specified serial port");
+        exit(EXIT_FAILURE);
     }
 
-    ioctl(fd, TCGETS2, &ntio);
-    ntio.c_cflag &= ~CBAUD;
-    ntio.c_cflag |= BOTHER | CREAD;
-    ntio.c_ispeed = baudrate;
-    ntio.c_ospeed = baudrate;
-    ioctl(fd, TCSETS2, &ntio);
+    result = sp_open(port, SP_MODE_READ_WRITE);
+    if (result != SP_OK) {
+        perror("Error opening the specified serial port");
+        exit(EXIT_FAILURE);
+    }
+
+    sp_set_baudrate(port, baudrate);
+    sp_set_bits(port, 8);
+    sp_set_parity(port, SP_PARITY_NONE);
+    sp_set_stopbits(port, 1);
+    sp_set_flowcontrol(port, SP_FLOWCONTROL_NONE);
 }
 
 Serial::~Serial() {
     // TODO: Close the fd if open
+    sp_close(port);
+    sp_free_port(port);
 }
 
-void Serial::writeData(const uint8_t* data, size_t size) {
-    write(fd, data, size);
+ssize_t Serial::writeData(const uint8_t* buffer, size_t length) {
+    ssize_t bytesWritten = sp_blocking_write(port, buffer, length, 0);
+    if (bytesWritten < 0) {
+        throw std::runtime_error("Failed to write to the serial port.");
+    }
+    return bytesWritten;
 }
 
-// void Serial::readData(uint8_t* buffer, size_t size){
-//     return read(fd, buffer, size);
-// }
+
 
 ssize_t Serial::readDataWithTimeout(uint8_t* buffer, size_t size, int timeoutMs) {
-    fd_set read_fds;
-    struct timeval timeout;
     size_t bytesRead = 0;
     unsigned long startTime = time(NULL);
 
     while (bytesRead < size && (time(NULL) - startTime) < (timeoutMs / 1000)) {
-        FD_ZERO(&read_fds);
-        FD_SET(fd, &read_fds);
+        ssize_t result = sp_nonblocking_read(port, buffer + bytesRead, size - bytesRead);
 
-        timeout.tv_sec = 0;
-        timeout.tv_usec = 1000;  // Check every millisecond
-
-        int selectResult = select(fd + 1, &read_fds, NULL, NULL, &timeout);
-
-        if (selectResult > 0) {
-            ssize_t result = read(fd, buffer + bytesRead, size - bytesRead);
-            if(result > 0) bytesRead += result;
-        } else if (selectResult < 0) {
+        if (result > 0) {
+            bytesRead += result;
+        } else if (result < 0) {
             return -1;  // Error
         }
+
+        usleep(1000);  // Sleep for a millisecond before the next attempt
     }
 
     return bytesRead;  // Return the number of bytes actually read
 }
+
+
 
 void Serial::decodeMessage(const uint8_t* response, float &tauEst, float &speed, float &position){
     int16_t motorTorque = (response[13] << 8 | response[12]);
@@ -173,16 +176,16 @@ void Serial::decodeMessage(const uint8_t* response, float &tauEst, float &speed,
 
 
 int main(){
-    while(true){
+    // while(true){
     uint8_t message[34];
     uint8_t response[78];
     int motorid = 2;
     int operation_mode = 10;
     float torque = 0.0;
     float position = 0.0;
-    float velocity = 0.0;
+    float velocity = 6.28;
     float kp = 0.0;
-    float kd = 0.0;
+    float kd = 0.1;
     float tauEst;
     float position_actual;
     float velocity_actual;
@@ -192,11 +195,11 @@ int main(){
 
     Serial serial("/dev/ttyUSB0", 4800000);
 
-    // while(true){
+    while(true){
 
         try {
             serial.writeData(message, sizeof(message));
-            std::cout << "Message sent successfully!" << std::endl;
+            // std::cout << "Message sent successfully!" << std::endl;
         } catch(const std::exception& e) {
             std::cerr << "An error occurred: " << e.what() << std::endl; 
         }
@@ -205,16 +208,16 @@ int main(){
         // std::cout << "bytesRead is " << bytesRead << std::endl;
 
         if (bytesRead == sizeof(response)) {
-                std::cout << "Full Response received from the motor:" << std::endl;
+                // std::cout << "Full Response received from the motor:" << std::endl;
                 // printMessage(response, bytesRead);
-                serial.decodeMessage(response, tauEst, position_actual, velocity_actual);
+                serial.decodeMessage(response, tauEst, velocity_actual, position_actual);
         }
 
         std::cout << "position is " << position_actual << std::endl;
 
 
 
-        usleep(2000);
+        usleep(200);
     }
 
     return 0;
