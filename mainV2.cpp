@@ -126,30 +126,95 @@ void Serial::writeData(const uint8_t* data, size_t size) {
     write(fd, data, size);
 }
 
+// void Serial::readData(uint8_t* buffer, size_t size){
+//     return read(fd, buffer, size);
+// }
+
+ssize_t Serial::readDataWithTimeout(uint8_t* buffer, size_t size, int timeoutMs) {
+    fd_set read_fds;
+    struct timeval timeout;
+    size_t bytesRead = 0;
+    unsigned long startTime = time(NULL);
+
+    while (bytesRead < size && (time(NULL) - startTime) < (timeoutMs / 1000)) {
+        FD_ZERO(&read_fds);
+        FD_SET(fd, &read_fds);
+
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 1000;  // Check every millisecond
+
+        int selectResult = select(fd + 1, &read_fds, NULL, NULL, &timeout);
+
+        if (selectResult > 0) {
+            ssize_t result = read(fd, buffer + bytesRead, size - bytesRead);
+            if(result > 0) bytesRead += result;
+        } else if (selectResult < 0) {
+            return -1;  // Error
+        }
+    }
+
+    return bytesRead;  // Return the number of bytes actually read
+}
+
+void Serial::decodeMessage(const uint8_t* response, float &tauEst, float &speed, float &position){
+    int16_t motorTorque = (response[13] << 8 | response[12]);
+    if (motorTorque > 250){
+        motorTorque = 0;
+    }
+    int16_t motorSpeed = (response[15] << 8) | response[14];
+    int32_t motorPosition = (response[33] << 24) | (response[32] << 16) | (response[31] << 8) | response[30];
+
+    // Convert the scaled values back to the original values
+    tauEst = static_cast<float>((motorTorque) / 256.0) * 9.1;
+    speed = static_cast<float>(motorSpeed) / 128.0 / 9.1;
+    position = static_cast<float>(motorPosition) / (16384.0 / (2.0 * 3.1415926)) / 9.1;
+
+}
+
+
 int main(){
+    while(true){
     uint8_t message[34];
+    uint8_t response[78];
     int motorid = 2;
-    int operation_mode = 5;
+    int operation_mode = 10;
     float torque = 0.0;
     float position = 0.0;
-    float velocity = 6.28;
+    float velocity = 0.0;
     float kp = 0.0;
-    float kd = 0.1;
+    float kd = 0.0;
+    float tauEst;
+    float position_actual;
+    float velocity_actual;
 
     generateMessage(motorid, operation_mode, torque, position, velocity, kp, kd, message);
-    printMessage(message, 34);
+    // printMessage(message, 34);
 
-    while(true){
+    Serial serial("/dev/ttyUSB0", 4800000);
+
+    // while(true){
 
         try {
-            Serial serial("/dev/ttyUSB0", 4800000);
             serial.writeData(message, sizeof(message));
             std::cout << "Message sent successfully!" << std::endl;
         } catch(const std::exception& e) {
             std::cerr << "An error occurred: " << e.what() << std::endl; 
         }
 
-        usleep(1000);
+        ssize_t bytesRead = serial.readDataWithTimeout(response, sizeof(response), 1000);
+        // std::cout << "bytesRead is " << bytesRead << std::endl;
+
+        if (bytesRead == sizeof(response)) {
+                std::cout << "Full Response received from the motor:" << std::endl;
+                // printMessage(response, bytesRead);
+                serial.decodeMessage(response, tauEst, position_actual, velocity_actual);
+        }
+
+        std::cout << "position is " << position_actual << std::endl;
+
+
+
+        usleep(2000);
     }
 
     return 0;
